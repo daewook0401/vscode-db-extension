@@ -1,0 +1,108 @@
+{
+  "name": "vscode-db-extension",
+  "displayName": "Personal DB Client",
+  "description": "A personal database client extension for VS Code.",
+  "version": "0.0.1",
+  "publisher": "daewook0401",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/daewook0401/vscode-db-extension.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:personalDbClient.connections",
+    "onCommand:personalDbClient.addConnection",
+    "onCommand:personalDbClient.refresh",
+    "onCommand:personalDbClient.runSelectedQuery",
+    "onCommand:personalDbClient.openTable"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "personalDbClient",
+          "title": "DB Client",
+          "icon": "media/database.svg"
+        }
+      ]
+    },
+    "views": {
+      "personalDbClient": [
+        {
+          "id": "personalDbClient.connections",
+          "name": "Connections"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "personalDbClient.addConnection",
+        "title": "DB Client: Add Connection",
+        "icon": "$(add)"
+      },
+      {
+        "command": "personalDbClient.refresh",
+        "title": "DB Client: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "personalDbClient.runSelectedQuery",
+        "title": "DB Client: Run Selected Query",
+        "icon": "$(play)"
+      },
+      {
+        "command": "personalDbClient.openTable",
+        "title": "DB Client: Open Table"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "personalDbClient.addConnection",
+          "when": "view == personalDbClient.connections",
+          "group": "navigation"
+        },
+        {
+          "command": "personalDbClient.refresh",
+          "when": "view == personalDbClient.connections",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "personalDbClient.runSelectedQuery",
+          "when": "resourceLangId == sql",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "personalDbClient.runSelectedQuery",
+        "key": "ctrl+alt+enter",
+        "mac": "cmd+alt+enter",
+        "when": "editorTextFocus && resourceLangId == sql"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "dependencies": {
+    "pg": "^8.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.8",
+    "@types/pg": "^8.11.6",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.5.2"
+  }
+}
