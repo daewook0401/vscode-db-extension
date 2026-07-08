@@ -6,6 +6,7 @@ import { SecretManager } from './connection/SecretManager';
 import { QueryExecutor } from './query/QueryExecutor';
 import { DatabaseTreeProvider } from './tree/DatabaseTreeProvider';
 import { TableReference } from './drivers/DbDriver';
+import { ConnectionPanel } from './webview/ConnectionPanel';
 import { ResultPanel } from './webview/ResultPanel';
 
 let activeSessionManager: ConnectionSessionManager | undefined;
@@ -21,16 +22,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider('personalDbClient.connections', treeProvider),
-    vscode.commands.registerCommand('personalDbClient.addConnection', async () => {
-      try {
-        const profile = await connectionManager.addProfileFromInput();
-        if (profile) {
-          treeProvider.refresh();
-          vscode.window.showInformationMessage(`Added DB connection "${profile.name}".`);
-        }
-      } catch (error) {
-        vscode.window.showErrorMessage(toErrorMessage(error));
-      }
+    vscode.commands.registerCommand('personalDbClient.addConnection', () => {
+      ConnectionPanel.showAdd({
+        context,
+        connectionManager,
+        sessionManager,
+        onSaved: () => treeProvider.refresh()
+      });
     }),
     vscode.commands.registerCommand('personalDbClient.refresh', () => {
       treeProvider.refresh();
@@ -74,16 +72,15 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
 
-      try {
-        const updatedProfile = await connectionManager.editProfileFromInput(profile);
-        if (updatedProfile) {
-          await sessionManager.disconnect(profile.id);
-          treeProvider.refresh();
-          vscode.window.showInformationMessage(`Updated DB connection "${updatedProfile.name}".`);
-        }
-      } catch (error) {
-        vscode.window.showErrorMessage(toErrorMessage(error));
-      }
+      ConnectionPanel.showEdit(
+        {
+          context,
+          connectionManager,
+          sessionManager,
+          onSaved: () => treeProvider.refresh()
+        },
+        profile
+      );
     }),
     vscode.commands.registerCommand('personalDbClient.deleteConnection', async (item) => {
       const profile = getConnectionProfile(item);
@@ -353,23 +350,27 @@ async function runConnectionAction(
         await openNewSqlPage(options.context, options.profile);
         return;
       case 'addConnection': {
-        const profile = await options.connectionManager.addProfileFromInput();
-        if (profile) {
-          options.treeProvider.refresh();
-          vscode.window.showInformationMessage(`Added DB connection "${profile.name}".`);
-        }
+        ConnectionPanel.showAdd({
+          context: options.context,
+          connectionManager: options.connectionManager,
+          sessionManager: options.sessionManager,
+          onSaved: () => options.treeProvider.refresh()
+        });
         return;
       }
       case 'manageConnection': {
         if (!options.profile) {
           return;
         }
-        const updatedProfile = await options.connectionManager.editProfileFromInput(options.profile);
-        if (updatedProfile) {
-          await options.sessionManager.disconnect(options.profile.id);
-          options.treeProvider.refresh();
-          vscode.window.showInformationMessage(`Updated DB connection "${updatedProfile.name}".`);
-        }
+        ConnectionPanel.showEdit(
+          {
+            context: options.context,
+            connectionManager: options.connectionManager,
+            sessionManager: options.sessionManager,
+            onSaved: () => options.treeProvider.refresh()
+          },
+          options.profile
+        );
         return;
       }
       case 'configureSchemas': {

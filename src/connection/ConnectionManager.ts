@@ -38,6 +38,13 @@ export class ConnectionManager {
       return undefined;
     }
 
+    return this.addProfile({
+      ...input,
+      password: input.password
+    });
+  }
+
+  public async addProfile(input: ConnectionProfileInput): Promise<ConnectionProfile> {
     const profile: ConnectionProfile = {
       id: crypto.randomUUID(),
       name: input.name,
@@ -70,6 +77,13 @@ export class ConnectionManager {
       return undefined;
     }
 
+    return this.updateProfile(profile, input);
+  }
+
+  public async updateProfile(
+    profile: ConnectionProfile,
+    input: ConnectionProfileUpdateInput
+  ): Promise<ConnectionProfile> {
     const updatedProfile: ConnectionProfile = {
       id: profile.id,
       name: input.name,
@@ -83,7 +97,7 @@ export class ConnectionManager {
       previewLimit: input.previewLimit
     };
 
-    if (input.password !== undefined) {
+    if (input.password !== undefined && input.password.length > 0) {
       await this.secretManager.savePassword(profile.id, input.password);
     }
 
