@@ -37,6 +37,15 @@ export class ResultPanel {
         return `<tr>${cells}</tr>`;
       })
       .join('');
+    const emptyState = result.columns.length === 0
+      ? '<p class="empty">Query completed. No tabular result was returned.</p>'
+      : '';
+    const table = result.columns.length === 0
+      ? ''
+      : `<table>
+    <thead><tr>${header}</tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -50,6 +59,24 @@ export class ResultPanel {
       color: var(--vscode-foreground);
       background: var(--vscode-editor-background);
       padding: 16px;
+    }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      margin: 0 0 12px;
+      color: var(--vscode-descriptionForeground);
+    }
+    pre {
+      background: var(--vscode-textCodeBlock-background);
+      border: 1px solid var(--vscode-panel-border);
+      padding: 12px;
+      overflow: auto;
+    }
+    .table-wrap {
+      overflow: auto;
+      max-height: 70vh;
+      border: 1px solid var(--vscode-panel-border);
     }
     table {
       border-collapse: collapse;
@@ -66,6 +93,7 @@ export class ResultPanel {
       background: var(--vscode-editorGroupHeader-tabsBackground);
       position: sticky;
       top: 0;
+      z-index: 1;
     }
     .empty {
       color: var(--vscode-descriptionForeground);
@@ -74,11 +102,14 @@ export class ResultPanel {
 </head>
 <body>
   <h2>${this.escapeHtml(title)}</h2>
-  <p class="empty">${result.rows.length} row(s)</p>
-  <table>
-    <thead><tr>${header}</tr></thead>
-    <tbody>${rows}</tbody>
-  </table>
+  <div class="meta">
+    <span>${result.rowCount} affected/returned row(s)</span>
+    <span>${result.rows.length} displayed row(s)</span>
+    <span>${result.durationMs} ms</span>
+  </div>
+  <pre>${this.escapeHtml(result.sql)}</pre>
+  ${emptyState}
+  <div class="table-wrap">${table}</div>
 </body>
 </html>`;
   }

@@ -19,7 +19,18 @@
     "onCommand:personalDbClient.addConnection",
     "onCommand:personalDbClient.refresh",
     "onCommand:personalDbClient.runSelectedQuery",
-    "onCommand:personalDbClient.openTable"
+    "onCommand:personalDbClient.openTable",
+    "onCommand:personalDbClient.newSqlPage",
+    "onCommand:personalDbClient.showConnectionActions",
+    "onCommand:personalDbClient.testConnection",
+    "onCommand:personalDbClient.editConnection",
+    "onCommand:personalDbClient.deleteConnection",
+    "onCommand:personalDbClient.disconnectConnection",
+    "onCommand:personalDbClient.configureSchemas",
+    "onCommand:personalDbClient.generateSelectSql",
+    "onCommand:personalDbClient.generateInsertSql",
+    "onCommand:personalDbClient.generateUpdateSql",
+    "onCommand:personalDbClient.generateDeleteSql"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -59,6 +70,57 @@
       {
         "command": "personalDbClient.openTable",
         "title": "DB Client: Open Table"
+      },
+      {
+        "command": "personalDbClient.newSqlPage",
+        "title": "DB Client: New SQL Page",
+        "icon": "$(add)"
+      },
+      {
+        "command": "personalDbClient.showConnectionActions",
+        "title": "DB Client: Connection Actions",
+        "icon": "$(kebab-vertical)"
+      },
+      {
+        "command": "personalDbClient.testConnection",
+        "title": "DB Client: Test Connection",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "personalDbClient.editConnection",
+        "title": "DB Client: Edit Connection",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "personalDbClient.deleteConnection",
+        "title": "DB Client: Delete Connection",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "personalDbClient.disconnectConnection",
+        "title": "DB Client: Disconnect",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "personalDbClient.configureSchemas",
+        "title": "DB Client: Configure Schemas",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "personalDbClient.generateSelectSql",
+        "title": "DB Client: Generate SELECT SQL"
+      },
+      {
+        "command": "personalDbClient.generateInsertSql",
+        "title": "DB Client: Generate INSERT SQL"
+      },
+      {
+        "command": "personalDbClient.generateUpdateSql",
+        "title": "DB Client: Generate UPDATE SQL"
+      },
+      {
+        "command": "personalDbClient.generateDeleteSql",
+        "title": "DB Client: Generate DELETE SQL"
       }
     ],
     "menus": {
@@ -72,6 +134,63 @@
           "command": "personalDbClient.refresh",
           "when": "view == personalDbClient.connections",
           "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "personalDbClient.newSqlPage",
+          "when": "view == personalDbClient.connections && viewItem == connection",
+          "group": "inline@1"
+        },
+        {
+          "command": "personalDbClient.showConnectionActions",
+          "when": "view == personalDbClient.connections && viewItem == connection",
+          "group": "inline@2"
+        },
+        {
+          "command": "personalDbClient.testConnection",
+          "when": "view == personalDbClient.connections && viewItem == connection",
+          "group": "connection@1"
+        },
+        {
+          "command": "personalDbClient.configureSchemas",
+          "when": "view == personalDbClient.connections && viewItem == connection",
+          "group": "connection@2"
+        },
+        {
+          "command": "personalDbClient.editConnection",
+          "when": "view == personalDbClient.connections && viewItem == connection",
+          "group": "connection@3"
+        },
+        {
+          "command": "personalDbClient.disconnectConnection",
+          "when": "view == personalDbClient.connections && viewItem == connection",
+          "group": "connection@4"
+        },
+        {
+          "command": "personalDbClient.deleteConnection",
+          "when": "view == personalDbClient.connections && viewItem == connection",
+          "group": "connection@5"
+        },
+        {
+          "command": "personalDbClient.generateSelectSql",
+          "when": "view == personalDbClient.connections && viewItem == table",
+          "group": "sql@1"
+        },
+        {
+          "command": "personalDbClient.generateInsertSql",
+          "when": "view == personalDbClient.connections && viewItem == table",
+          "group": "sql@2"
+        },
+        {
+          "command": "personalDbClient.generateUpdateSql",
+          "when": "view == personalDbClient.connections && viewItem == table",
+          "group": "sql@3"
+        },
+        {
+          "command": "personalDbClient.generateDeleteSql",
+          "when": "view == personalDbClient.connections && viewItem == table",
+          "group": "sql@4"
         }
       ],
       "editor/title": [

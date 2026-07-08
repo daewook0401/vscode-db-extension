@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../connection/ConnectionManager';
+import { ConnectionSessionManager } from '../connection/ConnectionSessionManager';
 import { ConnectionProfile } from '../connection/ConnectionProfile';
 import { TableReference } from '../drivers/DbDriver';
 
-type TreeNode = ConnectionNode | SchemaNode | TableNode;
+export type TreeNode = ConnectionNode | SchemaNode | TableNode;
 
 interface ConnectionNode {
   kind: 'connection';
@@ -28,7 +29,10 @@ export class DatabaseTreeProvider implements vscode.TreeDataProvider<TreeNode> {
 
   public readonly onDidChangeTreeData = this.onDidChangeTreeDataEmitter.event;
 
-  constructor(private readonly connectionManager: ConnectionManager) {}
+  constructor(
+    private readonly connectionManager: ConnectionManager,
+    private readonly sessionManager: ConnectionSessionManager
+  ) {}
 
   public refresh(): void {
     this.onDidChangeTreeDataEmitter.fire();
@@ -37,9 +41,11 @@ export class DatabaseTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   public getTreeItem(element: TreeNode): vscode.TreeItem {
     if (element.kind === 'connection') {
       const item = new vscode.TreeItem(element.profile.name, vscode.TreeItemCollapsibleState.Collapsed);
-      item.description = `${element.profile.type} ${element.profile.host}:${element.profile.port}/${element.profile.database}`;
+      const status = this.sessionManager.isConnected(element.profile.id) ? 'connected' : 'disconnected';
+      item.description = `${status} ${element.profile.type} ${element.profile.host}:${element.profile.port}/${element.profile.database}`;
+      item.tooltip = this.connectionTooltip(element.profile, status);
       item.contextValue = 'connection';
-      item.iconPath = new vscode.ThemeIcon('database');
+      item.iconPath = new vscode.ThemeIcon(status === 'connected' ? 'database' : 'circle-slash');
       return item;
     }
 
@@ -86,11 +92,10 @@ export class DatabaseTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   }
 
   private async loadSchemas(profile: ConnectionProfile): Promise<TreeNode[]> {
-    const driver = await this.connectionManager.createDriver(profile);
     try {
-      await driver.connect();
+      const driver = await this.sessionManager.getDriver(profile);
       const schemas = await driver.listSchemas();
-      return schemas.map((schema) => ({
+      return this.applySchemaFilters(profile, schemas).map((schema) => ({
         kind: 'schema',
         profile,
         schema
@@ -98,15 +103,12 @@ export class DatabaseTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     } catch (error) {
       vscode.window.showErrorMessage(this.toErrorMessage(error));
       return [];
-    } finally {
-      await driver.dispose();
     }
   }
 
   private async loadTables(profile: ConnectionProfile, schema: string): Promise<TreeNode[]> {
-    const driver = await this.connectionManager.createDriver(profile);
     try {
-      await driver.connect();
+      const driver = await this.sessionManager.getDriver(profile);
       const tables = await driver.listTables(schema);
       return tables.map((table) => ({
         kind: 'table',
@@ -117,9 +119,29 @@ export class DatabaseTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     } catch (error) {
       vscode.window.showErrorMessage(this.toErrorMessage(error));
       return [];
-    } finally {
-      await driver.dispose();
     }
+  }
+
+  private applySchemaFilters(profile: ConnectionProfile, schemas: string[]): string[] {
+    const filters = new Set((profile.schemaFilters ?? []).map((schema) => schema.toLowerCase()));
+    if (filters.size === 0) {
+      return schemas;
+    }
+
+    return schemas.filter((schema) => filters.has(schema.toLowerCase()));
+  }
+
+  private connectionTooltip(profile: ConnectionProfile, status: string): string {
+    const defaultSchema = profile.defaultSchema ? `Default schema: ${profile.defaultSchema}` : 'Default schema: not set';
+    const filters = profile.schemaFilters?.length ? `Visible schemas: ${profile.schemaFilters.join(', ')}` : 'Visible schemas: all';
+    const previewLimit = `Preview limit: ${profile.previewLimit ?? 100}`;
+    return [
+      `Status: ${status}`,
+      `${profile.type} ${profile.host}:${profile.port}/${profile.database}`,
+      defaultSchema,
+      filters,
+      previewLimit
+    ].join('\n');
   }
 
   private toErrorMessage(error: unknown): string {

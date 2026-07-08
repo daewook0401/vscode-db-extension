@@ -1,20 +1,41 @@
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../connection/ConnectionManager';
+import { ConnectionSessionManager } from '../connection/ConnectionSessionManager';
 import { ConnectionProfile } from '../connection/ConnectionProfile';
 import { TableReference } from '../drivers/DbDriver';
 import { ResultPanel } from '../webview/ResultPanel';
+import { SqlGenerator, SqlTemplateType } from './SqlGenerator';
 
-const DML_PATTERN = /^\s*(insert|update|delete)\b/i;
+const DANGEROUS_SQL_PATTERN = /^\s*(insert|update|delete|truncate|drop|alter|create)\b/i;
 
 export class QueryExecutor {
+  private readonly sqlGenerator = new SqlGenerator();
+
   constructor(
     private readonly connectionManager: ConnectionManager,
+    private readonly sessionManager: ConnectionSessionManager,
     private readonly resultPanel: ResultPanel
   ) {}
 
   public async openTable(tableRef: TableReference): Promise<void> {
-    const sql = `SELECT * FROM ${this.quoteIdentifier(tableRef.schema)}.${this.quoteIdentifier(tableRef.table)} LIMIT 100`;
+    const limit = tableRef.connection.previewLimit ?? 100;
+    const sql = `SELECT * FROM ${this.quoteIdentifier(tableRef.schema)}.${this.quoteIdentifier(tableRef.table)} LIMIT ${limit}`;
     await this.runQuery(tableRef.connection, sql, `${tableRef.schema}.${tableRef.table}`);
+  }
+
+  public async generateSql(type: SqlTemplateType, tableRef: TableReference): Promise<void> {
+    try {
+      const driver = await this.sessionManager.getDriver(tableRef.connection);
+      const columns = await driver.listColumns(tableRef.schema, tableRef.table);
+      const sql = this.sqlGenerator.generate(type, tableRef, columns, tableRef.connection.previewLimit ?? 100);
+      const document = await vscode.workspace.openTextDocument({
+        language: 'sql',
+        content: sql
+      });
+      await vscode.window.showTextDocument(document, vscode.ViewColumn.Beside);
+    } catch (error) {
+      vscode.window.showErrorMessage(this.toErrorMessage(error));
+    }
   }
 
   public async runSelectedQuery(): Promise<void> {
@@ -39,9 +60,9 @@ export class QueryExecutor {
   }
 
   private async runQuery(profile: ConnectionProfile, sql: string, title: string): Promise<void> {
-    if (DML_PATTERN.test(sql)) {
+    if (this.isDangerousSql(sql)) {
       const confirmed = await vscode.window.showWarningMessage(
-        'This query modifies data. Do you want to continue?',
+        'This query can change database state. Do you want to continue?',
         { modal: true },
         'Run Query'
       );
@@ -50,16 +71,22 @@ export class QueryExecutor {
       }
     }
 
-    const driver = await this.connectionManager.createDriver(profile);
+    const driver = await this.sessionManager.getDriver(profile);
     try {
-      await driver.connect();
       const result = await driver.query(sql);
       this.resultPanel.show(title, result);
     } catch (error) {
       vscode.window.showErrorMessage(this.toErrorMessage(error));
-    } finally {
-      await driver.dispose();
     }
+  }
+
+  private isDangerousSql(sql: string): boolean {
+    const normalizedSql = sql
+      .replace(/^\s*--.*$/gm, '')
+      .replace(/^\s*\/\*[\s\S]*?\*\//, '')
+      .trimStart();
+
+    return DANGEROUS_SQL_PATTERN.test(normalizedSql);
   }
 
   private getSqlFromEditor(editor: vscode.TextEditor): string {
