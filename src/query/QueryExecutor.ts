@@ -74,7 +74,9 @@ export class QueryExecutor {
     const driver = await this.sessionManager.getDriver(profile);
     try {
       const result = await driver.query(sql);
-      this.resultPanel.show(title, result);
+      this.resultPanel.show(title, result, {
+        onRerun: () => this.runQuery(profile, sql, title)
+      });
     } catch (error) {
       vscode.window.showErrorMessage(this.toErrorMessage(error));
     }
