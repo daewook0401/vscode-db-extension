@@ -48,7 +48,11 @@ ${values}
 
   private generateUpdate(tableRef: TableReference, columns: ColumnInfo[]): string {
     const primaryKeys = columns.filter((column) => column.isPrimaryKey);
-    const updateColumns = columns.filter((column) => !column.isPrimaryKey);
+    const updateColumns = columns.filter((column) => (
+      !column.isPrimaryKey
+      && !column.isIdentity
+      && !column.isGenerated
+    ));
     const assignments = updateColumns
       .map((column) => `  ${this.quoteIdentifier(column.name)} = ${this.placeholderFor(column)}`)
       .join(',\n') || '  /* TODO: add column assignment */';
@@ -80,11 +84,45 @@ ${whereClause};`;
 
   private shouldSkipInsertColumn(column: ColumnInfo): boolean {
     const defaultValue = column.columnDefault?.toLowerCase() ?? '';
-    return defaultValue.includes('nextval(') || defaultValue.includes('generated');
+    return column.isIdentity
+      || column.isGenerated
+      || defaultValue.includes('nextval(')
+      || defaultValue.includes('generated');
   }
 
   private placeholderFor(column: ColumnInfo): string {
-    return `NULL /* ${column.name}: ${column.dataType} */`;
+    const dataType = column.dataType.toLowerCase();
+    const comment = `/* TODO: ${column.name} (${column.dataType}) */`;
+
+    if (dataType.includes('bool')) {
+      return `FALSE ${comment}`;
+    }
+    if (/smallint|integer|bigint|decimal|numeric|real|double|money/.test(dataType)) {
+      return `0 ${comment}`;
+    }
+    if (dataType === 'date') {
+      return `CURRENT_DATE ${comment}`;
+    }
+    if (dataType.includes('timestamp')) {
+      return `CURRENT_TIMESTAMP ${comment}`;
+    }
+    if (dataType.startsWith('time')) {
+      return `CURRENT_TIME ${comment}`;
+    }
+    if (dataType.includes('uuid')) {
+      return `'00000000-0000-0000-0000-000000000000' ${comment}`;
+    }
+    if (dataType.includes('json')) {
+      return `'{}' ${comment}`;
+    }
+    if (dataType.includes('array') || dataType.endsWith('[]')) {
+      return `'{}' ${comment}`;
+    }
+    if (/char|text|name|inet|cidr|xml/.test(dataType)) {
+      return `'value' ${comment}`;
+    }
+
+    return `NULL ${comment}`;
   }
 
   private qualifiedTable(tableRef: TableReference): string {

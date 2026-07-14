@@ -1,18 +1,50 @@
+import * as os from 'os';
 import * as vscode from 'vscode';
-import { QueryResult } from '../drivers/DbDriver';
+import { ColumnInfo, QueryResult, TableReference } from '../drivers/DbDriver';
 
 interface ResultPanelOptions {
+  connectionLabel: string;
   onRerun?: () => Promise<void>;
+  table?: {
+    reference: TableReference;
+    columns: ColumnInfo[];
+  };
+  pagination?: {
+    offset: number;
+    limit: number;
+    hasPrevious: boolean;
+    hasNext: boolean;
+    onPage: (offset: number) => Promise<void>;
+  };
 }
 
-export class ResultPanel {
-  private panel: vscode.WebviewPanel | undefined;
-  private currentResult: QueryResult | undefined;
-  private rerun: (() => Promise<void>) | undefined;
+interface PanelState {
+  key: string;
+  panel: vscode.WebviewPanel;
+  title: string;
+  result: QueryResult;
+  options: ResultPanelOptions;
+}
 
-  public show(title: string, result: QueryResult, options: ResultPanelOptions = {}): void {
-    if (!this.panel) {
-      this.panel = vscode.window.createWebviewPanel(
+export class ResultPanel implements vscode.Disposable {
+  private readonly panels = new Map<string, PanelState>();
+
+  public dispose(): void {
+    for (const state of [...this.panels.values()]) {
+      state.panel.dispose();
+    }
+    this.panels.clear();
+  }
+
+  public show(
+    key: string,
+    title: string,
+    result: QueryResult,
+    options: ResultPanelOptions
+  ): void {
+    let state = this.panels.get(key);
+    if (!state) {
+      const panel = vscode.window.createWebviewPanel(
         'personalDbClient.results',
         title,
         vscode.ViewColumn.Active,
@@ -21,85 +53,129 @@ export class ResultPanel {
           retainContextWhenHidden: true
         }
       );
+      state = { key, panel, title, result, options };
+      this.panels.set(key, state);
 
-      this.panel.onDidDispose(() => {
-        this.panel = undefined;
-        this.currentResult = undefined;
-        this.rerun = undefined;
+      panel.onDidDispose(() => {
+        if (this.panels.get(key)?.panel === panel) {
+          this.panels.delete(key);
+        }
       });
-
-      this.panel.webview.onDidReceiveMessage((message) => {
-        void this.handleMessage(message);
+      panel.webview.onDidReceiveMessage((message) => {
+        const currentState = this.panels.get(key);
+        if (currentState) {
+          void this.handleMessage(currentState, message);
+        }
       });
+    } else {
+      state.title = title;
+      state.result = result;
+      state.options = options;
     }
 
-    this.currentResult = result;
-    this.rerun = options.onRerun;
-    this.panel.title = title;
-    this.panel.webview.html = this.renderHtml(title, result, this.panel.webview);
-    this.panel.reveal(vscode.ViewColumn.Active);
+    state.panel.title = title;
+    state.panel.webview.html = this.renderHtml(state, state.panel.webview);
+    state.panel.reveal(vscode.ViewColumn.Active);
   }
 
-  private async handleMessage(message: unknown): Promise<void> {
+  private async handleMessage(state: PanelState, message: unknown): Promise<void> {
     if (!this.isResultMessage(message)) {
       return;
     }
 
     if (message.command === 'rerun') {
-      await this.rerun?.();
+      await this.runPanelAction(state, state.options.onRerun);
       return;
     }
 
-    if (!this.currentResult) {
+    if (message.command === 'page') {
+      const offset = Number(message.offset);
+      const onPage = state.options.pagination?.onPage;
+      if (Number.isInteger(offset) && offset >= 0 && onPage) {
+        await this.runPanelAction(state, () => onPage(offset));
+      }
       return;
     }
 
     if (message.command === 'copySql') {
-      await vscode.env.clipboard.writeText(this.currentResult.sql);
-      vscode.window.showInformationMessage('Copied SQL to clipboard.');
+      await vscode.env.clipboard.writeText(state.result.sql);
+      vscode.window.setStatusBarMessage('DB Client: SQL copied', 2500);
+      return;
+    }
+
+    if (message.command === 'copyRows') {
+      await this.copyRows(state.result, message.indices);
+      return;
+    }
+
+    if (message.command === 'copyCell') {
+      await this.copyCell(state.result, message.row, message.column);
       return;
     }
 
     if (message.command === 'exportCsv') {
-      await this.exportCsv(this.currentResult);
+      await this.exportCsv(state.title, state.result);
     }
   }
 
-  private renderHtml(title: string, result: QueryResult, webview: vscode.Webview): string {
+  private async runPanelAction(state: PanelState, action: (() => Promise<void>) | undefined): Promise<void> {
+    if (!action) {
+      return;
+    }
+
+    await state.panel.webview.postMessage({ command: 'busy', value: true });
+    try {
+      await action();
+    } catch (error) {
+      vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      await state.panel.webview.postMessage({ command: 'busy', value: false });
+    }
+  }
+
+  private renderHtml(state: PanelState, webview: vscode.Webview): string {
+    const { result, options, title } = state;
     const nonce = this.createNonce();
-    const inferredTypes = this.inferColumnTypes(result);
+    const rowOffset = options.pagination?.offset ?? 0;
     const header = result.columns
       .map((column) => `<th>
-        <div class="column-name">${this.escapeHtml(column)}</div>
-        <div class="column-type">${this.escapeHtml(inferredTypes.get(column) ?? 'unknown')}</div>
+        <div class="column-name">${this.escapeHtml(column.name)}</div>
+        <div class="column-type">${this.escapeHtml(column.dataType)}</div>
       </th>`)
       .join('');
     const rows = result.rows
-      .map((row, index) => {
+      .map((row, rowIndex) => {
         const cells = result.columns
-          .map((column) => `<td title="${this.escapeAttribute(this.formatValue(row[column]))}">${this.escapeHtml(this.formatValue(row[column]))}</td>`)
+          .map((_, columnIndex) => this.renderCell(row[columnIndex], rowIndex, columnIndex))
           .join('');
-        return `<tr data-row-text="${this.escapeAttribute(this.rowSearchText(row, result.columns))}">
-          <td class="selector"><input type="checkbox" aria-label="Select row ${index + 1}"></td>
-          <td class="row-number">${index + 1}</td>
+        return `<tr class="data-row" data-index="${rowIndex}" data-row-text="${this.escapeAttribute(this.rowSearchText(row))}">
+          <td class="selector"><input class="row-select" type="checkbox" data-index="${rowIndex}" aria-label="Select row ${rowOffset + rowIndex + 1}"></td>
+          <td class="row-number">${rowOffset + rowIndex + 1}</td>
           ${cells}
         </tr>`;
       })
       .join('');
-    const table = result.columns.length === 0
-      ? '<div class="empty">Query completed. No tabular result was returned.</div>'
-      : `<table>
+    const dataTable = result.columns.length === 0
+      ? `<div class="empty">Query completed. ${result.rowCount} row(s) affected.</div>`
+      : `<table class="data-table">
           <thead>
             <tr>
-              <th class="selector"></th>
+              <th class="selector"><input id="select-all" type="checkbox" aria-label="Select all visible rows"></th>
               <th class="row-number">#</th>
               ${header}
             </tr>
           </thead>
           <tbody id="result-body">${rows}</tbody>
         </table>`;
+    const structureTab = options.table
+      ? '<button class="section-tab" type="button" data-view="structure">Structure</button>'
+      : '';
+    const structureView = options.table
+      ? `<section id="structure-view" class="content-view structure-view" hidden>${this.renderStructure(options.table.columns)}</section>`
+      : '';
+    const pagination = this.renderPagination(options, result.rows.length);
     const completedAt = new Date().toLocaleTimeString();
-    const visibleCount = result.rows.length;
+    const compactSql = result.sql.replace(/\s+/g, ' ').trim();
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -112,24 +188,17 @@ export class ResultPanel {
     :root {
       --db-bg: var(--vscode-editor-background);
       --db-panel: var(--vscode-sideBar-background);
-      --db-panel-2: var(--vscode-editorGroupHeader-tabsBackground);
-      --db-border: var(--vscode-panel-border);
+      --db-border: var(--vscode-panel-border, var(--vscode-editorGroup-border));
       --db-text: var(--vscode-foreground);
       --db-muted: var(--vscode-descriptionForeground);
       --db-accent: var(--vscode-textLink-foreground);
-      --db-green: #6bd26b;
-      --db-warn: #d7a65f;
-      --db-cell: rgba(255, 255, 255, 0.018);
+      --db-positive: var(--vscode-testing-iconPassed, #73c991);
+      --db-cell: color-mix(in srgb, var(--vscode-editor-background) 96%, var(--vscode-foreground));
       --db-hover: var(--vscode-list-hoverBackground);
-      --db-selected: var(--vscode-list-activeSelectionBackground);
+      --db-selection: var(--vscode-list-activeSelectionBackground);
     }
-    * {
-      box-sizing: border-box;
-    }
-    html,
-    body {
-      height: 100%;
-    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
     body {
       margin: 0;
       overflow: hidden;
@@ -138,111 +207,134 @@ export class ResultPanel {
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
     }
+    button, input { font: inherit; }
+    button:focus-visible, input:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+    [hidden] { display: none !important; }
     .workbench {
       display: grid;
-      grid-template-rows: auto auto auto 1fr 190px;
+      grid-template-rows: 34px 34px minmax(0, 1fr) auto;
       height: 100vh;
-      min-width: 900px;
+      min-width: 0;
     }
-    .tab-strip {
+    .context-bar {
       display: flex;
-      align-items: center;
-      min-height: 34px;
-      border-bottom: 1px solid var(--db-border);
-      background: var(--db-panel-2);
-    }
-    .tab {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      height: 34px;
-      padding: 0 12px;
-      border-right: 1px solid var(--db-border);
-      background: var(--db-bg);
-      color: var(--db-text);
-      font-weight: 600;
-    }
-    .tab .close {
-      color: var(--db-muted);
-    }
-    .section-tabs {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      min-height: 32px;
-      padding: 0 12px;
+      align-items: stretch;
+      justify-content: space-between;
+      min-width: 0;
       border-bottom: 1px solid var(--db-border);
       background: var(--db-panel);
+    }
+    .section-tabs { display: flex; min-width: 0; }
+    .section-tab {
+      position: relative;
+      min-width: 82px;
+      height: 34px;
+      padding: 0 12px;
+      border: 0;
+      color: var(--db-muted);
+      background: transparent;
+      cursor: pointer;
+    }
+    .section-tab:hover { color: var(--db-text); background: var(--db-hover); }
+    .section-tab.active { color: var(--db-text); }
+    .section-tab.active::after {
+      content: '';
+      position: absolute;
+      right: 10px;
+      bottom: 0;
+      left: 10px;
+      height: 2px;
+      background: var(--vscode-focusBorder);
+    }
+    .connection-label {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      max-width: 42%;
+      padding: 0 12px;
       color: var(--db-muted);
       white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .section-tabs span.active {
-      color: var(--db-text);
-      font-weight: 600;
-    }
-    .sql-line {
+    .query-line {
       display: flex;
       align-items: center;
       gap: 8px;
-      min-height: 34px;
-      padding: 0 12px;
+      min-width: 0;
+      padding: 0 8px 0 12px;
       border-bottom: 1px solid var(--db-border);
       background: var(--db-bg);
-      font-family: var(--vscode-editor-font-family);
-      color: var(--vscode-editor-foreground);
     }
-    .keyword {
-      color: #c586c0;
-      font-weight: 700;
+    .query-line code {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      color: var(--vscode-editor-foreground);
+      font-family: var(--vscode-editor-font-family);
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .content-view { min-width: 0; min-height: 0; }
+    .data-view {
+      display: grid;
+      grid-template-rows: 38px minmax(0, 1fr);
     }
     .toolbar {
       display: flex;
       align-items: center;
-      gap: 6px;
-      min-height: 36px;
-      padding: 4px 12px;
+      gap: 4px;
+      min-width: 0;
+      padding: 4px 8px;
+      overflow-x: auto;
       border-bottom: 1px solid var(--db-border);
       background: var(--db-panel);
+      scrollbar-width: thin;
     }
-    .toolbar input {
-      width: 220px;
-      height: 26px;
-      border: 1px solid var(--vscode-input-border);
+    .filter {
+      flex: 0 0 220px;
+      height: 27px;
+      padding: 0 8px;
+      border: 1px solid var(--vscode-input-border, transparent);
       color: var(--vscode-input-foreground);
       background: var(--vscode-input-background);
-      padding: 0 8px;
     }
-    .tool {
+    .tool-button {
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 5px;
+      height: 27px;
       min-width: 28px;
-      height: 24px;
       padding: 0 7px;
       border: 0;
-      color: var(--db-accent);
+      color: var(--db-text);
       background: transparent;
-      font-size: 15px;
+      white-space: nowrap;
       cursor: pointer;
     }
-    .tool:hover {
-      background: var(--db-hover);
+    .tool-button:hover:not(:disabled) { background: var(--db-hover); }
+    .tool-button:disabled { color: var(--vscode-disabledForeground); cursor: default; }
+    .tool-button.primary { color: var(--db-positive); }
+    .tool-button.compact { padding: 0 6px; }
+    .toolbar-separator {
+      width: 1px;
+      height: 20px;
+      margin: 0 3px;
+      background: var(--db-border);
     }
-    .tool.run {
-      color: var(--db-green);
-    }
-    .spacer {
-      flex: 1;
-    }
-    .cost {
-      color: var(--db-accent);
-      font-weight: 600;
-    }
-    .count {
+    .toolbar-spacer { flex: 1 0 16px; }
+    .meta {
       color: var(--db-muted);
+      white-space: nowrap;
     }
-    .grid-wrap {
+    .duration { color: var(--db-accent); }
+    .grid-wrap, .structure-view {
+      min-width: 0;
+      min-height: 0;
       overflow: auto;
       background: var(--db-bg);
     }
@@ -252,200 +344,321 @@ export class ResultPanel {
       border-collapse: collapse;
       table-layout: fixed;
     }
-    th,
-    td {
-      max-width: 340px;
+    th, td {
       min-width: 130px;
-      border-right: 1px solid var(--db-border);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      max-width: 360px;
       padding: 6px 8px;
       overflow: hidden;
+      border-right: 1px solid var(--db-border);
+      border-bottom: 1px solid color-mix(in srgb, var(--db-border) 65%, transparent);
+      background: var(--db-cell);
+      text-align: left;
       text-overflow: ellipsis;
       white-space: nowrap;
-      background: var(--db-cell);
     }
     th {
       position: sticky;
       top: 0;
       z-index: 2;
-      height: 44px;
-      text-align: left;
+      height: 43px;
       background: var(--db-panel);
     }
-    tbody tr:hover td {
-      background: var(--db-hover);
-    }
-    .selector,
-    .row-number {
-      min-width: 42px;
-      max-width: 42px;
-      width: 42px;
-      color: var(--db-muted);
-      text-align: center;
+    tbody tr:hover td { background: var(--db-hover); }
+    tbody tr:has(.row-select:checked) td { background: var(--db-selection); }
+    .selector, .row-number {
       position: sticky;
       left: 0;
       z-index: 1;
-      background: var(--db-panel);
-    }
-    .row-number {
-      left: 42px;
-    }
-    th.selector,
-    th.row-number {
-      z-index: 3;
-    }
-    .column-name {
-      color: var(--db-text);
-      font-weight: 600;
-    }
-    .column-type {
-      margin-top: 3px;
+      width: 42px;
+      min-width: 42px;
+      max-width: 42px;
       color: var(--db-muted);
-      font-size: 11px;
-      font-weight: 400;
+      background: var(--db-panel);
+      text-align: center;
     }
-    .bottom {
+    .row-number { left: 42px; }
+    th.selector, th.row-number { z-index: 3; }
+    .column-name { color: var(--db-text); font-weight: 600; }
+    .column-type { margin-top: 3px; color: var(--db-muted); font-size: 11px; }
+    .null-value { color: var(--db-muted); font-style: italic; }
+    .structure-table th, .structure-table td { min-width: 120px; }
+    .structure-table .column-wide { min-width: 240px; }
+    .key-badge { color: var(--vscode-symbolIcon-keyForeground, var(--db-accent)); font-weight: 600; }
+    .empty { padding: 18px; color: var(--db-muted); }
+    .log-panel {
       display: grid;
-      grid-template-rows: 34px 1fr;
+      grid-template-rows: 30px minmax(0, 86px);
+      min-height: 30px;
       border-top: 1px solid var(--db-border);
       background: var(--db-panel);
-      min-height: 0;
     }
-    .result-tabs {
+    .log-heading {
       display: flex;
       align-items: center;
-      gap: 2px;
+      justify-content: space-between;
+      padding: 0 8px 0 12px;
+      color: var(--db-muted);
       border-bottom: 1px solid var(--db-border);
     }
-    .result-tab {
-      height: 34px;
-      min-width: 110px;
+    .log-content {
+      margin: 0;
       padding: 8px 12px;
-      border-right: 1px solid var(--db-border);
-      color: var(--db-muted);
-    }
-    .result-tab.active {
-      color: var(--db-text);
-      background: var(--db-bg);
-    }
-    .logs {
       overflow: auto;
-      padding: 10px 12px;
+      color: var(--db-muted);
       font-family: var(--vscode-editor-font-family);
       font-size: 12px;
-      color: var(--db-muted);
       white-space: pre-wrap;
     }
-    .log-ok {
-      color: var(--db-green);
-    }
-    .log-sql {
-      color: var(--db-warn);
-    }
-    .empty {
-      padding: 18px;
-      color: var(--db-muted);
+    .log-ok { color: var(--db-positive); }
+    @media (max-width: 680px) {
+      .filter { flex-basis: 150px; }
+      .connection-label { max-width: 34%; }
+      .tool-label { display: none; }
     }
   </style>
 </head>
 <body>
   <main class="workbench">
-    <div class="tab-strip">
-      <div class="tab">▦ ${this.escapeHtml(title)} <span class="close">×</span></div>
+    <header class="context-bar">
+      <nav class="section-tabs" aria-label="Result views">
+        <button class="section-tab active" type="button" data-view="data">Data</button>
+        ${structureTab}
+      </nav>
+      <div class="connection-label" title="${this.escapeAttribute(options.connectionLabel)}">DB: ${this.escapeHtml(options.connectionLabel)}</div>
+    </header>
+    <div class="query-line">
+      <code title="${this.escapeAttribute(compactSql)}">${this.escapeHtml(compactSql)}</code>
+      <button id="copy-sql" class="tool-button compact" type="button" title="Copy SQL">Copy SQL</button>
     </div>
-    <div class="section-tabs">
-      <span>✎ Properties</span>
-      <span class="active">▦ Data</span>
-      <span>🔗 ER Diagram</span>
-      <span>⚗ Mock</span>
-      <span>🔧 Manager</span>
-      <span class="spacer"></span>
-      <span>{ }</span>
-      <span>↻</span>
-      <span>▣ ${this.escapeHtml(this.databaseLabel(title))}</span>
-    </div>
-    <div class="sql-line">
-      <span class="keyword">SELECT</span>
-      <span>*</span>
-      <span class="keyword">FROM</span>
-      <span>${this.escapeHtml(title)}</span>
-      <span class="keyword">LIMIT</span>
-      <span>${this.escapeHtml(this.extractLimit(result.sql))}</span>
-    </div>
-    <div class="toolbar">
-      <input id="filter" placeholder="Search result">
-      <button id="rerun" class="tool run" title="Run again">▶ Run</button>
-      <button id="refresh" class="tool" title="Refresh result">⟳</button>
-      <button id="copy-sql" class="tool" title="Copy SQL">⧉ SQL</button>
-      <button id="export-csv" class="tool" title="Export CSV">⇩ CSV</button>
-      <span class="cost">Cost: ${result.durationMs}ms</span>
-      <span id="visible-count" class="count">${visibleCount} shown</span>
-      <span class="spacer"></span>
-      <span>1</span>
-      <span>2</span>
-      <span>3</span>
-      <span>4</span>
-      <span>…</span>
-      <strong>Total ${result.rowCount}</strong>
-    </div>
-    <div class="grid-wrap">
-      ${table}
-    </div>
-    <section class="bottom">
-      <div class="result-tabs">
-        <div class="result-tab active">▦ Result</div>
-        <div class="result-tab">▦ Log</div>
-        <div class="result-tab">▦ Console</div>
+    <section id="data-view" class="content-view data-view">
+      <div class="toolbar">
+        <input id="filter" class="filter" placeholder="Search rows" aria-label="Search rows">
+        <button id="rerun" class="tool-button primary" type="button" title="Run query again" data-busy-action>▶ <span class="tool-label">Run</span></button>
+        <button id="copy-rows" class="tool-button" type="button" title="Copy selected rows as tab-separated values" disabled>Copy rows</button>
+        <button id="export-csv" class="tool-button" type="button" title="Export displayed rows to CSV">Export CSV</button>
+        <span class="toolbar-separator"></span>
+        <span id="visible-count" class="meta">${result.rows.length} shown</span>
+        <span class="meta duration">${result.durationMs}ms</span>
+        <span class="toolbar-spacer"></span>
+        ${pagination}
       </div>
-      <div class="logs">
-<span class="log-ok">Execution completed in ${result.durationMs}ms</span>
-${this.escapeHtml(completedAt)} [INFO] Executing: <span class="log-sql">${this.escapeHtml(result.sql)}</span>
-${this.escapeHtml(completedAt)} [INFO] Result: ${result.rowCount} row(s) affected, ${result.rows.length} row(s) displayed
-${this.escapeHtml(completedAt)} [INFO] Result: Completed
+      <div class="grid-wrap">${dataTable}</div>
+    </section>
+    ${structureView}
+    <section id="log-panel" class="log-panel">
+      <div class="log-heading">
+        <span>Execution log</span>
+        <button id="toggle-log" class="tool-button compact" type="button" title="Collapse execution log">⌃</button>
       </div>
+      <pre id="log-content" class="log-content"><span class="log-ok">Completed in ${result.durationMs}ms</span>
+${this.escapeHtml(completedAt)}  ${this.escapeHtml(options.connectionLabel)}
+${this.escapeHtml(result.sql)}
+${result.rowCount} row(s) affected, ${result.rows.length} row(s) displayed</pre>
     </section>
   </main>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    const savedState = vscode.getState() || {};
     const filter = document.getElementById('filter');
-    const rows = [...document.querySelectorAll('#result-body tr')];
+    const rows = [...document.querySelectorAll('.data-row')];
     const visibleCount = document.getElementById('visible-count');
-    const updateVisibleCount = () => {
-      const shown = rows.filter((row) => row.style.display !== 'none').length;
-      if (visibleCount) {
-        visibleCount.textContent = shown + ' shown';
+    const copyRowsButton = document.getElementById('copy-rows');
+    const selectAll = document.getElementById('select-all');
+    const logPanel = document.getElementById('log-panel');
+    const logContent = document.getElementById('log-content');
+    const toggleLog = document.getElementById('toggle-log');
+
+    const persistState = (changes) => {
+      Object.assign(savedState, changes);
+      vscode.setState(savedState);
+    };
+    const updateSelection = () => {
+      const selected = [...document.querySelectorAll('.row-select:checked')];
+      if (copyRowsButton) {
+        copyRowsButton.disabled = selected.length === 0;
+        copyRowsButton.textContent = selected.length > 0 ? 'Copy ' + selected.length + ' row(s)' : 'Copy rows';
+      }
+      if (selectAll) {
+        const visibleCheckboxes = rows
+          .filter((row) => row.style.display !== 'none')
+          .map((row) => row.querySelector('.row-select'))
+          .filter(Boolean);
+        selectAll.checked = visibleCheckboxes.length > 0 && visibleCheckboxes.every((checkbox) => checkbox.checked);
+        selectAll.indeterminate = visibleCheckboxes.some((checkbox) => checkbox.checked) && !selectAll.checked;
       }
     };
-    filter?.addEventListener('input', () => {
-      const query = filter.value.trim().toLowerCase();
+    const applyFilter = () => {
+      const query = (filter?.value || '').trim().toLowerCase();
+      let shown = 0;
       for (const row of rows) {
-        row.style.display = row.dataset.rowText.includes(query) ? '' : 'none';
+        const visible = row.dataset.rowText.includes(query);
+        row.style.display = visible ? '' : 'none';
+        if (visible) shown += 1;
       }
-      updateVisibleCount();
+      if (visibleCount) visibleCount.textContent = shown + ' shown';
+      updateSelection();
+    };
+    const selectView = (view) => {
+      for (const button of document.querySelectorAll('.section-tab')) {
+        button.classList.toggle('active', button.dataset.view === view);
+      }
+      document.getElementById('data-view').hidden = view !== 'data';
+      const structure = document.getElementById('structure-view');
+      if (structure) structure.hidden = view !== 'structure';
+      persistState({ view });
+    };
+    const setLogCollapsed = (collapsed) => {
+      if (!logPanel || !logContent || !toggleLog) return;
+      logContent.hidden = collapsed;
+      logPanel.style.gridTemplateRows = collapsed ? '30px' : '30px minmax(0, 86px)';
+      toggleLog.textContent = collapsed ? '⌄' : '⌃';
+      toggleLog.title = collapsed ? 'Expand execution log' : 'Collapse execution log';
+      persistState({ logCollapsed: collapsed });
+    };
+
+    if (filter) {
+      filter.value = savedState.filter || '';
+      filter.addEventListener('input', () => {
+        persistState({ filter: filter.value });
+        applyFilter();
+      });
+    }
+    for (const button of document.querySelectorAll('.section-tab')) {
+      button.addEventListener('click', () => selectView(button.dataset.view));
+    }
+    for (const checkbox of document.querySelectorAll('.row-select')) {
+      checkbox.addEventListener('change', updateSelection);
+    }
+    selectAll?.addEventListener('change', () => {
+      for (const row of rows) {
+        if (row.style.display !== 'none') {
+          row.querySelector('.row-select').checked = selectAll.checked;
+        }
+      }
+      updateSelection();
     });
-    document.getElementById('rerun')?.addEventListener('click', () => {
-      vscode.postMessage({ command: 'rerun' });
+    document.getElementById('rerun')?.addEventListener('click', () => vscode.postMessage({ command: 'rerun' }));
+    document.getElementById('copy-sql')?.addEventListener('click', () => vscode.postMessage({ command: 'copySql' }));
+    document.getElementById('export-csv')?.addEventListener('click', () => vscode.postMessage({ command: 'exportCsv' }));
+    copyRowsButton?.addEventListener('click', () => {
+      const indices = [...document.querySelectorAll('.row-select:checked')].map((checkbox) => Number(checkbox.dataset.index));
+      vscode.postMessage({ command: 'copyRows', indices });
     });
-    document.getElementById('refresh')?.addEventListener('click', () => {
-      vscode.postMessage({ command: 'rerun' });
+    for (const cell of document.querySelectorAll('td[data-column]')) {
+      cell.addEventListener('dblclick', () => {
+        vscode.postMessage({ command: 'copyCell', row: Number(cell.dataset.row), column: Number(cell.dataset.column) });
+      });
+    }
+    for (const button of document.querySelectorAll('[data-page-offset]')) {
+      button.addEventListener('click', () => vscode.postMessage({ command: 'page', offset: Number(button.dataset.pageOffset) }));
+    }
+    toggleLog?.addEventListener('click', () => setLogCollapsed(!logContent.hidden));
+    window.addEventListener('message', (event) => {
+      if (event.data?.command !== 'busy') return;
+      for (const button of document.querySelectorAll('[data-busy-action], [data-page-offset]')) {
+        if (!button.dataset.defaultDisabled) {
+          button.dataset.defaultDisabled = String(button.disabled);
+        }
+        button.disabled = Boolean(event.data.value) || button.dataset.defaultDisabled === 'true';
+      }
     });
-    document.getElementById('copy-sql')?.addEventListener('click', () => {
-      vscode.postMessage({ command: 'copySql' });
-    });
-    document.getElementById('export-csv')?.addEventListener('click', () => {
-      vscode.postMessage({ command: 'exportCsv' });
-    });
+
+    selectView(savedState.view === 'structure' && document.getElementById('structure-view') ? 'structure' : 'data');
+    setLogCollapsed(Boolean(savedState.logCollapsed));
+    applyFilter();
   </script>
 </body>
 </html>`;
   }
 
-  private async exportCsv(result: QueryResult): Promise<void> {
+  private renderCell(value: unknown, rowIndex: number, columnIndex: number): string {
+    const formatted = this.formatValue(value);
+    const className = value === null ? ' class="null-value"' : '';
+    return `<td${className} data-row="${rowIndex}" data-column="${columnIndex}" title="${this.escapeAttribute(formatted)}">${this.escapeHtml(formatted)}</td>`;
+  }
+
+  private renderStructure(columns: ColumnInfo[]): string {
+    if (columns.length === 0) {
+      return '<div class="empty">No column metadata was returned.</div>';
+    }
+
+    const rows = columns.map((column) => {
+      const flags = [
+        column.isPrimaryKey ? 'Primary key' : '',
+        column.isIdentity ? 'Identity' : '',
+        column.isGenerated ? 'Generated' : ''
+      ].filter(Boolean).join(', ');
+      return `<tr>
+        <td class="column-wide">${this.escapeHtml(column.name)}</td>
+        <td>${this.escapeHtml(column.dataType)}</td>
+        <td>${column.isPrimaryKey ? '<span class="key-badge">PK</span>' : ''}</td>
+        <td>${column.isNullable ? 'YES' : 'NO'}</td>
+        <td class="column-wide" title="${this.escapeAttribute(column.columnDefault ?? '')}">${this.escapeHtml(column.columnDefault ?? '')}</td>
+        <td>${this.escapeHtml(flags)}</td>
+      </tr>`;
+    }).join('');
+
+    return `<table class="structure-table">
+      <thead><tr><th>Name</th><th>Type</th><th>Key</th><th>Nullable</th><th>Default</th><th>Attributes</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
+
+  private renderPagination(options: ResultPanelOptions, rowCount: number): string {
+    const pagination = options.pagination;
+    if (!pagination) {
+      return `<span class="meta">${rowCount} row(s)</span>`;
+    }
+
+    const start = rowCount > 0 ? pagination.offset + 1 : 0;
+    const end = pagination.offset + rowCount;
+    const previousOffset = Math.max(0, pagination.offset - pagination.limit);
+    const nextOffset = pagination.offset + pagination.limit;
+    return `<button class="tool-button compact" type="button" title="Previous page" data-page-offset="${previousOffset}" ${pagination.hasPrevious ? '' : 'disabled'}>‹</button>
+      <span class="meta">Rows ${start}-${end}${pagination.hasNext ? '+' : ''}</span>
+      <button class="tool-button compact" type="button" title="Next page" data-page-offset="${nextOffset}" ${pagination.hasNext ? '' : 'disabled'}>›</button>`;
+  }
+
+  private async copyRows(result: QueryResult, rawIndices: unknown): Promise<void> {
+    if (!Array.isArray(rawIndices)) {
+      return;
+    }
+
+    const indices = [...new Set(rawIndices)]
+      .filter((value): value is number => Number.isInteger(value) && value >= 0 && value < result.rows.length);
+    if (indices.length === 0) {
+      return;
+    }
+
+    const lines = [result.columns.map((column) => this.escapeTsv(column.name)).join('\t')];
+    for (const index of indices) {
+      lines.push(result.rows[index].map((value) => this.escapeTsv(this.formatValue(value))).join('\t'));
+    }
+
+    await vscode.env.clipboard.writeText(lines.join('\n'));
+    vscode.window.setStatusBarMessage(`DB Client: copied ${indices.length} row(s)`, 2500);
+  }
+
+  private async copyCell(result: QueryResult, rawRow: unknown, rawColumn: unknown): Promise<void> {
+    const row = Number(rawRow);
+    const column = Number(rawColumn);
+    if (!Number.isInteger(row) || !Number.isInteger(column) || !result.rows[row] || column < 0 || column >= result.columns.length) {
+      return;
+    }
+
+    await vscode.env.clipboard.writeText(this.formatValue(result.rows[row][column]));
+    vscode.window.setStatusBarMessage('DB Client: cell copied', 2000);
+  }
+
+  private async exportCsv(title: string, result: QueryResult): Promise<void> {
+    const fileName = `${this.sanitizeFileName(title)}-${this.timestampForFileName()}.csv`;
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri;
+    const defaultUri = workspaceFolder
+      ? vscode.Uri.joinPath(workspaceFolder, fileName)
+      : vscode.Uri.joinPath(vscode.Uri.file(os.homedir()), fileName);
     const uri = await vscode.window.showSaveDialog({
-      defaultUri: vscode.Uri.file(`query-result-${this.timestampForFileName()}.csv`),
-      filters: {
-        CSV: ['csv']
-      },
+      defaultUri,
+      filters: { CSV: ['csv'] },
       saveLabel: 'Export CSV'
     });
     if (!uri) {
@@ -458,63 +671,23 @@ ${this.escapeHtml(completedAt)} [INFO] Result: Completed
   }
 
   private toCsv(result: QueryResult): string {
-    const lines = [
-      result.columns.map((column) => this.escapeCsv(column)).join(',')
-    ];
-
+    const lines = [result.columns.map((column) => this.escapeCsv(column.name)).join(',')];
     for (const row of result.rows) {
-      lines.push(result.columns.map((column) => this.escapeCsv(this.formatValue(row[column]))).join(','));
+      lines.push(row.map((value) => this.escapeCsv(this.formatValue(value))).join(','));
     }
-
-    return `${lines.join('\n')}\n`;
+    return `\uFEFF${lines.join('\r\n')}\r\n`;
   }
 
   private escapeCsv(value: string): string {
-    if (/[",\n\r]/.test(value)) {
-      return `"${value.replace(/"/g, '""')}"`;
-    }
-
-    return value;
+    return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
   }
 
-  private inferColumnTypes(result: QueryResult): Map<string, string> {
-    const types = new Map<string, string>();
-    for (const column of result.columns) {
-      const value = result.rows.find((row) => row[column] !== null && row[column] !== undefined)?.[column];
-      types.set(column, this.inferValueType(value));
-    }
-    return types;
+  private escapeTsv(value: string): string {
+    return value.replace(/[\t\r\n]+/g, ' ');
   }
 
-  private inferValueType(value: unknown): string {
-    if (value === undefined || value === null) {
-      return 'unknown';
-    }
-    if (value instanceof Date) {
-      return 'timestamp';
-    }
-    if (typeof value === 'number') {
-      return Number.isInteger(value) ? 'integer' : 'numeric';
-    }
-    if (typeof value === 'boolean') {
-      return 'boolean';
-    }
-    if (typeof value === 'object') {
-      return 'json';
-    }
-    return 'varchar';
-  }
-
-  private extractLimit(sql: string): string {
-    return /limit\s+(\d+)/i.exec(sql)?.[1] ?? '-';
-  }
-
-  private databaseLabel(title: string): string {
-    return title.split('.')[0] || 'database';
-  }
-
-  private rowSearchText(row: Record<string, unknown>, columns: string[]): string {
-    return columns.map((column) => this.formatValue(row[column]).toLowerCase()).join(' ');
+  private rowSearchText(row: unknown[]): string {
+    return row.map((value) => this.formatValue(value).toLowerCase()).join(' ');
   }
 
   private formatValue(value: unknown): string {
@@ -527,8 +700,15 @@ ${this.escapeHtml(completedAt)} [INFO] Result: Completed
     if (value instanceof Date) {
       return value.toISOString();
     }
+    if (Buffer.isBuffer(value)) {
+      return `\\x${value.toString('hex')}`;
+    }
     if (typeof value === 'object') {
-      return JSON.stringify(value);
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return String(value);
+      }
     }
     return String(value);
   }
@@ -546,15 +726,21 @@ ${this.escapeHtml(completedAt)} [INFO] Result: Completed
     return new Date().toISOString().replace(/[:.]/g, '-');
   }
 
+  private sanitizeFileName(value: string): string {
+    return value.trim().replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'query-result';
+  }
+
   private isResultMessage(message: unknown): message is ResultMessage {
-    return typeof message === 'object'
-      && message !== null
-      && 'command' in message
-      && (
-        message.command === 'rerun'
-        || message.command === 'copySql'
-        || message.command === 'exportCsv'
-      );
+    if (typeof message !== 'object' || message === null || !('command' in message)) {
+      return false;
+    }
+
+    return message.command === 'rerun'
+      || message.command === 'page'
+      || message.command === 'copySql'
+      || message.command === 'copyRows'
+      || message.command === 'copyCell'
+      || message.command === 'exportCsv';
   }
 
   private escapeHtml(value: string): string {
@@ -572,5 +758,9 @@ ${this.escapeHtml(completedAt)} [INFO] Result: Completed
 }
 
 interface ResultMessage {
-  command: 'rerun' | 'copySql' | 'exportCsv';
+  command: 'rerun' | 'page' | 'copySql' | 'copyRows' | 'copyCell' | 'exportCsv';
+  offset?: unknown;
+  indices?: unknown;
+  row?: unknown;
+  column?: unknown;
 }

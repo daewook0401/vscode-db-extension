@@ -2,7 +2,7 @@
   "name": "vscode-db-extension",
   "displayName": "Personal DB Client",
   "description": "A personal database client extension for VS Code.",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "publisher": "daewook0401",
   "repository": {
     "type": "git",
@@ -30,7 +30,9 @@
     "onCommand:personalDbClient.generateSelectSql",
     "onCommand:personalDbClient.generateInsertSql",
     "onCommand:personalDbClient.generateUpdateSql",
-    "onCommand:personalDbClient.generateDeleteSql"
+    "onCommand:personalDbClient.generateDeleteSql",
+    "onCommand:personalDbClient.copyQualifiedName",
+    "onCommand:personalDbClient.selectQueryConnection"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -51,6 +53,12 @@
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "personalDbClient.connections",
+        "contents": "No database connections.\n[Add Connection](command:personalDbClient.addConnection)"
+      }
+    ],
     "commands": [
       {
         "command": "personalDbClient.addConnection",
@@ -69,7 +77,8 @@
       },
       {
         "command": "personalDbClient.openTable",
-        "title": "DB Client: Open Table"
+        "title": "DB Client: Open Data",
+        "icon": "$(eye)"
       },
       {
         "command": "personalDbClient.newSqlPage",
@@ -121,6 +130,16 @@
       {
         "command": "personalDbClient.generateDeleteSql",
         "title": "DB Client: Generate DELETE SQL"
+      },
+      {
+        "command": "personalDbClient.copyQualifiedName",
+        "title": "DB Client: Copy Qualified Name",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "personalDbClient.selectQueryConnection",
+        "title": "DB Client: Select Query Connection",
+        "icon": "$(database)"
       }
     ],
     "menus": {
@@ -173,6 +192,21 @@
           "group": "connection@5"
         },
         {
+          "command": "personalDbClient.openTable",
+          "when": "view == personalDbClient.connections && viewItem == table",
+          "group": "inline@1"
+        },
+        {
+          "command": "personalDbClient.copyQualifiedName",
+          "when": "view == personalDbClient.connections && viewItem == table",
+          "group": "inline@2"
+        },
+        {
+          "command": "personalDbClient.copyQualifiedName",
+          "when": "view == personalDbClient.connections && viewItem == table",
+          "group": "navigation@1"
+        },
+        {
           "command": "personalDbClient.generateSelectSql",
           "when": "view == personalDbClient.connections && viewItem == table",
           "group": "sql@1"
@@ -195,13 +229,24 @@
       ],
       "editor/title": [
         {
+          "command": "personalDbClient.selectQueryConnection",
+          "when": "resourceLangId == sql",
+          "group": "navigation@1"
+        },
+        {
           "command": "personalDbClient.runSelectedQuery",
           "when": "resourceLangId == sql",
-          "group": "navigation"
+          "group": "navigation@2"
         }
       ]
     },
     "keybindings": [
+      {
+        "command": "personalDbClient.runSelectedQuery",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && resourceLangId == sql"
+      },
       {
         "command": "personalDbClient.runSelectedQuery",
         "key": "ctrl+alt+enter",
@@ -212,6 +257,7 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
+    "test": "npm run compile && node --test test/*.test.js",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile"
   },

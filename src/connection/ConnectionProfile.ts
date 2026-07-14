@@ -1,4 +1,5 @@
 export type DatabaseType = 'postgres' | 'mysql';
+export type SslMode = 'disable' | 'require' | 'verify-full';
 
 export interface ConnectionProfile {
   id: string;
@@ -8,6 +9,7 @@ export interface ConnectionProfile {
   port: number;
   database: string;
   username: string;
+  sslMode?: SslMode;
   defaultSchema?: string;
   schemaFilters?: string[];
   previewLimit?: number;
@@ -21,6 +23,7 @@ export interface ConnectionProfileInput {
   database: string;
   username: string;
   password: string;
+  sslMode: SslMode;
   defaultSchema?: string;
   schemaFilters?: string[];
   previewLimit: number;
@@ -34,6 +37,7 @@ export interface ConnectionProfileUpdateInput {
   database: string;
   username: string;
   password?: string;
+  sslMode: SslMode;
   defaultSchema?: string;
   schemaFilters?: string[];
   previewLimit: number;

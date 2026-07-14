@@ -1,4 +1,4 @@
-import { ColumnInfo, DbDriver, QueryResult } from './DbDriver';
+import { ColumnInfo, DatabaseObjectInfo, DbDriver, QueryResult } from './DbDriver';
 
 export class MysqlDriver implements DbDriver {
   public async connect(): Promise<void> {
@@ -9,7 +9,7 @@ export class MysqlDriver implements DbDriver {
     throw new Error('MySQL/MariaDB support is not implemented in this MVP.');
   }
 
-  public async listTables(_schema: string): Promise<string[]> {
+  public async listObjects(_schema: string): Promise<DatabaseObjectInfo[]> {
     throw new Error('MySQL/MariaDB support is not implemented in this MVP.');
   }
 

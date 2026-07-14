@@ -3,6 +3,7 @@
 node_modules/**
 src/**
 docs/**
+test/**
 .gitignore
 tsconfig.json
 **/*.map

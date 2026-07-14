@@ -7,12 +7,11 @@ import {
   ConnectionProfile,
   ConnectionProfileInput,
   ConnectionProfileUpdateInput,
-  DatabaseType
+  SslMode
 } from './ConnectionProfile';
 import { SecretManager } from './SecretManager';
 
 const CONNECTIONS_KEY = 'personalDbClient.connections';
-const DATABASE_TYPES: DatabaseType[] = ['postgres', 'mysql'];
 const DEFAULT_PREVIEW_LIMIT = 100;
 
 export class ConnectionManager {
@@ -29,21 +28,6 @@ export class ConnectionManager {
     return this.getProfiles().find((profile) => profile.id === profileId);
   }
 
-  public async addProfileFromInput(): Promise<ConnectionProfile | undefined> {
-    const input = await this.promptForConnection();
-    if (!input) {
-      return undefined;
-    }
-    if (input.password === undefined) {
-      return undefined;
-    }
-
-    return this.addProfile({
-      ...input,
-      password: input.password
-    });
-  }
-
   public async addProfile(input: ConnectionProfileInput): Promise<ConnectionProfile> {
     const profile: ConnectionProfile = {
       id: crypto.randomUUID(),
@@ -53,6 +37,7 @@ export class ConnectionManager {
       port: input.port,
       database: input.database,
       username: input.username,
+      sslMode: input.sslMode,
       defaultSchema: input.defaultSchema,
       schemaFilters: input.schemaFilters,
       previewLimit: input.previewLimit
@@ -61,23 +46,6 @@ export class ConnectionManager {
     await this.secretManager.savePassword(profile.id, input.password);
     await this.saveProfiles([...this.getProfiles(), profile]);
     return profile;
-  }
-
-  public async editProfileFromInput(profile: ConnectionProfile): Promise<ConnectionProfile | undefined> {
-    const passwordAction = await vscode.window.showQuickPick(['Keep existing password', 'Change password'], {
-      title: 'Password',
-      placeHolder: 'Choose whether to update the stored password'
-    });
-    if (!passwordAction) {
-      return undefined;
-    }
-
-    const input = await this.promptForConnection(profile, passwordAction === 'Change password');
-    if (!input) {
-      return undefined;
-    }
-
-    return this.updateProfile(profile, input);
   }
 
   public async updateProfile(
@@ -92,6 +60,7 @@ export class ConnectionManager {
       port: input.port,
       database: input.database,
       username: input.username,
+      sslMode: input.sslMode,
       defaultSchema: input.defaultSchema,
       schemaFilters: input.schemaFilters,
       previewLimit: input.previewLimit
@@ -173,146 +142,51 @@ export class ConnectionManager {
       throw new Error(`Password for "${profile.name}" was not found. Recreate the connection profile.`);
     }
 
+    return this.createDriverWithPassword(profile, password);
+  }
+
+  public async testConnectionInput(
+    input: ConnectionProfileInput | ConnectionProfileUpdateInput,
+    existingProfile?: ConnectionProfile
+  ): Promise<void> {
+    const password = input.password !== undefined
+      ? input.password
+      : existingProfile
+        ? await this.secretManager.getPassword(existingProfile.id)
+        : undefined;
+
+    if (password === undefined) {
+      throw new Error('Password is required to test this connection.');
+    }
+
+    const temporaryProfile: ConnectionProfile = {
+      id: existingProfile?.id ?? 'connection-test',
+      name: input.name,
+      type: input.type,
+      host: input.host,
+      port: input.port,
+      database: input.database,
+      username: input.username,
+      sslMode: input.sslMode,
+      defaultSchema: input.defaultSchema,
+      schemaFilters: input.schemaFilters,
+      previewLimit: input.previewLimit
+    };
+    const driver = this.createDriverWithPassword(temporaryProfile, password);
+
+    try {
+      await driver.connect();
+    } finally {
+      await driver.dispose();
+    }
+  }
+
+  private createDriverWithPassword(profile: ConnectionProfile, password: string): DbDriver {
     if (profile.type === 'postgres') {
       return new PostgresDriver(profile, password);
     }
 
     return new MysqlDriver();
-  }
-
-  private async promptForConnection(
-    existingProfile?: ConnectionProfile,
-    requirePassword = true
-  ): Promise<ConnectionProfileInput | ConnectionProfileUpdateInput | undefined> {
-    const type = await vscode.window.showQuickPick(DATABASE_TYPES, {
-      title: 'Database type',
-      placeHolder: 'Select database type'
-    });
-    if (!type) {
-      return undefined;
-    }
-    if (!this.isDatabaseType(type)) {
-      return undefined;
-    }
-    if (type === 'mysql') {
-      vscode.window.showInformationMessage('MySQL/MariaDB is planned but not implemented in this MVP.');
-    }
-
-    const host = await vscode.window.showInputBox({
-      title: 'Host',
-      prompt: 'Database host',
-      value: existingProfile?.host ?? 'localhost',
-      ignoreFocusOut: true,
-      validateInput: (value) => value.trim() ? undefined : 'Host is required.'
-    });
-    if (!host) {
-      return undefined;
-    }
-
-    const defaultPort = type === 'postgres' ? '5432' : '3306';
-    const portValue = await vscode.window.showInputBox({
-      title: 'Port',
-      prompt: 'Database port',
-      value: String(existingProfile?.port ?? defaultPort),
-      ignoreFocusOut: true,
-      validateInput: (value) => {
-        const port = Number(value);
-        return Number.isInteger(port) && port > 0 && port <= 65535 ? undefined : 'Enter a valid port.';
-      }
-    });
-    if (!portValue) {
-      return undefined;
-    }
-
-    const database = await vscode.window.showInputBox({
-      title: 'Database',
-      prompt: 'Database name',
-      value: existingProfile?.database,
-      ignoreFocusOut: true,
-      validateInput: (value) => value.trim() ? undefined : 'Database is required.'
-    });
-    if (!database) {
-      return undefined;
-    }
-
-    const username = await vscode.window.showInputBox({
-      title: 'Username',
-      prompt: 'Database username',
-      value: existingProfile?.username,
-      ignoreFocusOut: true,
-      validateInput: (value) => value.trim() ? undefined : 'Username is required.'
-    });
-    if (!username) {
-      return undefined;
-    }
-
-    let password: string | undefined;
-    if (requirePassword) {
-      password = await vscode.window.showInputBox({
-        title: 'Password',
-        prompt: 'Database password',
-        password: true,
-        ignoreFocusOut: true
-      });
-      if (password === undefined) {
-        return undefined;
-      }
-    }
-
-    const name = await vscode.window.showInputBox({
-      title: 'Connection name',
-      prompt: 'Display name in the DB Client tree',
-      value: existingProfile?.name ?? `${username}@${host}/${database}`,
-      ignoreFocusOut: true,
-      validateInput: (value) => value.trim() ? undefined : 'Connection name is required.'
-    });
-    if (!name) {
-      return undefined;
-    }
-
-    const defaultSchema = await vscode.window.showInputBox({
-      title: 'Default schema',
-      prompt: 'Optional schema used first for SQL execution and generated SQL',
-      value: existingProfile?.defaultSchema ?? 'public',
-      ignoreFocusOut: true
-    });
-    if (defaultSchema === undefined) {
-      return undefined;
-    }
-
-    const schemaFilters = await vscode.window.showInputBox({
-      title: 'Visible schemas',
-      prompt: 'Comma-separated schema names. Leave empty to show all schemas.',
-      value: existingProfile?.schemaFilters?.join(', ') ?? '',
-      ignoreFocusOut: true
-    });
-    if (schemaFilters === undefined) {
-      return undefined;
-    }
-
-    const previewLimit = await vscode.window.showInputBox({
-      title: 'Table preview limit',
-      prompt: 'Maximum number of rows to fetch when clicking a table',
-      value: String(existingProfile?.previewLimit ?? DEFAULT_PREVIEW_LIMIT),
-      ignoreFocusOut: true,
-      validateInput: (value) => this.validatePreviewLimit(value)
-    });
-    if (previewLimit === undefined) {
-      return undefined;
-    }
-
-    return {
-      name: name.trim(),
-      type,
-      host: host.trim(),
-      port: Number(portValue),
-      database: database.trim(),
-      username: username.trim(),
-      password,
-      defaultSchema: this.toOptionalString(defaultSchema),
-      schemaFilters: this.parseSchemaFilters(schemaFilters),
-      previewLimit: Number(previewLimit)
-    };
   }
 
   private async saveProfiles(profiles: ConnectionProfile[]): Promise<void> {
@@ -322,16 +196,14 @@ export class ConnectionManager {
   private normalizeProfile(profile: ConnectionProfile): ConnectionProfile {
     return {
       ...profile,
+      sslMode: this.normalizeSslMode(profile.sslMode),
       schemaFilters: profile.schemaFilters ?? [],
       previewLimit: profile.previewLimit ?? DEFAULT_PREVIEW_LIMIT
     };
   }
 
   private parseSchemaFilters(value: string): string[] {
-    return value
-      .split(',')
-      .map((schema) => schema.trim())
-      .filter(Boolean);
+    return [...new Set(value.split(',').map((schema) => schema.trim()).filter(Boolean))];
   }
 
   private toOptionalString(value: string): string | undefined {
@@ -346,7 +218,7 @@ export class ConnectionManager {
       : 'Enter a row limit between 1 and 10000.';
   }
 
-  private isDatabaseType(value: string): value is DatabaseType {
-    return value === 'postgres' || value === 'mysql';
+  private normalizeSslMode(value: SslMode | undefined): SslMode {
+    return value === 'require' || value === 'verify-full' ? value : 'disable';
   }
 }

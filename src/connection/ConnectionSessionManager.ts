@@ -1,9 +1,13 @@
+import * as vscode from 'vscode';
 import { DbDriver } from '../drivers/DbDriver';
 import { ConnectionManager } from './ConnectionManager';
 import { ConnectionProfile } from './ConnectionProfile';
 
 export class ConnectionSessionManager {
   private readonly drivers = new Map<string, DbDriver>();
+  private readonly onDidChangeConnectionEmitter = new vscode.EventEmitter<string | undefined>();
+
+  public readonly onDidChangeConnection = this.onDidChangeConnectionEmitter.event;
 
   constructor(private readonly connectionManager: ConnectionManager) {}
 
@@ -21,6 +25,7 @@ export class ConnectionSessionManager {
     try {
       await driver.connect();
       this.drivers.set(profile.id, driver);
+      this.onDidChangeConnectionEmitter.fire(profile.id);
       return driver;
     } catch (error) {
       await driver.dispose();
@@ -29,8 +34,13 @@ export class ConnectionSessionManager {
   }
 
   public async testConnection(profile: ConnectionProfile): Promise<void> {
-    const driver = await this.getDriver(profile);
-    await driver.connect();
+    const cachedDriver = this.drivers.get(profile.id);
+    if (cachedDriver) {
+      await cachedDriver.connect();
+      return;
+    }
+
+    await this.getDriver(profile);
   }
 
   public async disconnect(profileId: string): Promise<boolean> {
@@ -41,6 +51,7 @@ export class ConnectionSessionManager {
 
     this.drivers.delete(profileId);
     await driver.dispose();
+    this.onDidChangeConnectionEmitter.fire(profileId);
     return true;
   }
 
@@ -49,5 +60,6 @@ export class ConnectionSessionManager {
     this.drivers.clear();
 
     await Promise.all(drivers.map((driver) => driver.dispose()));
+    this.onDidChangeConnectionEmitter.fire(undefined);
   }
 }

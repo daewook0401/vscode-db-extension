@@ -16,29 +16,38 @@ export function activate(context: vscode.ExtensionContext): void {
   const connectionManager = new ConnectionManager(context.globalState, secretManager);
   const sessionManager = new ConnectionSessionManager(connectionManager);
   const resultPanel = new ResultPanel();
-  const queryExecutor = new QueryExecutor(connectionManager, sessionManager, resultPanel);
+  const queryExecutor = new QueryExecutor(connectionManager, sessionManager, resultPanel, context.workspaceState);
   const treeProvider = new DatabaseTreeProvider(connectionManager, sessionManager);
+  const refreshConnections = (): void => {
+    treeProvider.refresh();
+    queryExecutor.refreshStatus();
+  };
   activeSessionManager = sessionManager;
 
   context.subscriptions.push(
-    vscode.window.registerTreeDataProvider('personalDbClient.connections', treeProvider),
+    resultPanel,
+    queryExecutor,
+    treeProvider,
+    vscode.window.createTreeView('personalDbClient.connections', {
+      treeDataProvider: treeProvider,
+      showCollapseAll: true
+    }),
     vscode.commands.registerCommand('personalDbClient.addConnection', () => {
       ConnectionPanel.showAdd({
-        context,
         connectionManager,
         sessionManager,
-        onSaved: () => treeProvider.refresh()
+        onSaved: refreshConnections
       });
     }),
     vscode.commands.registerCommand('personalDbClient.refresh', () => {
       treeProvider.refresh();
     }),
-    vscode.commands.registerCommand('personalDbClient.openTable', async (tableRef) => {
-      await queryExecutor.openTable(tableRef);
+    vscode.commands.registerCommand('personalDbClient.openTable', async (item) => {
+      await runTableCommand(item, (tableRef) => queryExecutor.openTable(tableRef));
     }),
     vscode.commands.registerCommand('personalDbClient.newSqlPage', async (item) => {
       const profile = getConnectionProfile(item);
-      await openNewSqlPage(context, profile);
+      await openNewSqlPage(context, queryExecutor, profile);
     }),
     vscode.commands.registerCommand('personalDbClient.showConnectionActions', async (item) => {
       const profile = getConnectionProfile(item);
@@ -47,6 +56,7 @@ export function activate(context: vscode.ExtensionContext): void {
         connectionManager,
         sessionManager,
         treeProvider,
+        queryExecutor,
         context
       });
     }),
@@ -59,7 +69,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
       try {
         await sessionManager.testConnection(profile);
-        treeProvider.refresh();
+        refreshConnections();
         vscode.window.showInformationMessage(`Connected to "${profile.name}".`);
       } catch (error) {
         vscode.window.showErrorMessage(toErrorMessage(error));
@@ -74,10 +84,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
       ConnectionPanel.showEdit(
         {
-          context,
           connectionManager,
           sessionManager,
-          onSaved: () => treeProvider.refresh()
+          onSaved: refreshConnections
         },
         profile
       );
@@ -93,7 +102,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await sessionManager.disconnect(profile.id);
         const deleted = await connectionManager.deleteProfile(profile);
         if (deleted) {
-          treeProvider.refresh();
+          refreshConnections();
           vscode.window.showInformationMessage(`Deleted DB connection "${profile.name}".`);
         }
       } catch (error) {
@@ -109,7 +118,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
       try {
         const disconnected = await sessionManager.disconnect(profile.id);
-        treeProvider.refresh();
+        refreshConnections();
         vscode.window.showInformationMessage(
           disconnected ? `Disconnected "${profile.name}".` : `"${profile.name}" is already disconnected.`
         );
@@ -128,7 +137,7 @@ export function activate(context: vscode.ExtensionContext): void {
         const updatedProfile = await connectionManager.configureSchemas(profile);
         if (updatedProfile) {
           await sessionManager.disconnect(profile.id);
-          treeProvider.refresh();
+          refreshConnections();
           vscode.window.showInformationMessage(`Updated schema settings for "${updatedProfile.name}".`);
         }
       } catch (error) {
@@ -146,6 +155,16 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('personalDbClient.generateDeleteSql', async (item) => {
       await runTableCommand(item, (tableRef) => queryExecutor.generateSql('delete', tableRef));
+    }),
+    vscode.commands.registerCommand('personalDbClient.copyQualifiedName', async (item) => {
+      await runTableCommand(item, async (tableRef) => {
+        const qualifiedName = `${quoteIdentifier(tableRef.schema)}.${quoteIdentifier(tableRef.table)}`;
+        await vscode.env.clipboard.writeText(qualifiedName);
+        vscode.window.setStatusBarMessage(`DB Client: copied ${qualifiedName}`, 2500);
+      });
+    }),
+    vscode.commands.registerCommand('personalDbClient.selectQueryConnection', async () => {
+      await queryExecutor.selectConnectionForActiveEditor();
     }),
     vscode.commands.registerCommand('personalDbClient.runSelectedQuery', async () => {
       await queryExecutor.runSelectedQuery();
@@ -236,6 +255,7 @@ function isTableReference(item: unknown): item is TableReference {
 
 async function openNewSqlPage(
   context: vscode.ExtensionContext,
+  queryExecutor: QueryExecutor,
   profile: ConnectionProfile | undefined
 ): Promise<void> {
   const sqlDirectory = vscode.Uri.joinPath(context.globalStorageUri, 'sql');
@@ -250,7 +270,10 @@ async function openNewSqlPage(
 
   await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
   const document = await vscode.workspace.openTextDocument(uri);
-  await vscode.window.showTextDocument(document, vscode.ViewColumn.Beside);
+  if (profile) {
+    await queryExecutor.bindDocument(document, profile);
+  }
+  await vscode.window.showTextDocument(document, vscode.ViewColumn.Active);
 }
 
 function buildNewSqlContent(profile: ConnectionProfile | undefined): string {
@@ -283,6 +306,7 @@ async function showConnectionActions(options: {
   connectionManager: ConnectionManager;
   sessionManager: ConnectionSessionManager;
   treeProvider: DatabaseTreeProvider;
+  queryExecutor: QueryExecutor;
   context: vscode.ExtensionContext;
 }): Promise<void> {
   const items: Array<vscode.QuickPickItem & { action: string }> = [
@@ -300,6 +324,11 @@ async function showConnectionActions(options: {
 
   if (options.profile) {
     items.push(
+      {
+        label: options.sessionManager.isConnected(options.profile.id) ? 'Test Connection' : 'Connect',
+        description: 'Open and verify the database session',
+        action: 'testConnection'
+      },
       {
         label: 'Manage Connection',
         description: 'Edit host, port, database, user, password, and schema settings',
@@ -341,20 +370,23 @@ async function runConnectionAction(
     connectionManager: ConnectionManager;
     sessionManager: ConnectionSessionManager;
     treeProvider: DatabaseTreeProvider;
+    queryExecutor: QueryExecutor;
     context: vscode.ExtensionContext;
   }
 ): Promise<void> {
   try {
     switch (action) {
       case 'newSqlPage':
-        await openNewSqlPage(options.context, options.profile);
+        await openNewSqlPage(options.context, options.queryExecutor, options.profile);
         return;
       case 'addConnection': {
         ConnectionPanel.showAdd({
-          context: options.context,
           connectionManager: options.connectionManager,
           sessionManager: options.sessionManager,
-          onSaved: () => options.treeProvider.refresh()
+          onSaved: () => {
+            options.treeProvider.refresh();
+            options.queryExecutor.refreshStatus();
+          }
         });
         return;
       }
@@ -364,13 +396,24 @@ async function runConnectionAction(
         }
         ConnectionPanel.showEdit(
           {
-            context: options.context,
             connectionManager: options.connectionManager,
             sessionManager: options.sessionManager,
-            onSaved: () => options.treeProvider.refresh()
+            onSaved: () => {
+              options.treeProvider.refresh();
+              options.queryExecutor.refreshStatus();
+            }
           },
           options.profile
         );
+        return;
+      }
+      case 'testConnection': {
+        if (!options.profile) {
+          return;
+        }
+        await options.sessionManager.testConnection(options.profile);
+        options.treeProvider.refresh();
+        vscode.window.showInformationMessage(`Connected to "${options.profile.name}".`);
         return;
       }
       case 'configureSchemas': {
