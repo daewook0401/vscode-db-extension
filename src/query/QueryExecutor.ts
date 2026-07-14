@@ -15,6 +15,7 @@ export class QueryExecutor implements vscode.Disposable {
   private readonly statusBarItem: vscode.StatusBarItem;
   private readonly subscriptions: vscode.Disposable[] = [];
   private readonly transientBindings = new Map<string, string>();
+  private lastSqlViewColumn = vscode.ViewColumn.One;
 
   constructor(
     private readonly connectionManager: ConnectionManager,
@@ -25,8 +26,12 @@ export class QueryExecutor implements vscode.Disposable {
     this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
     this.statusBarItem.command = 'personalDbClient.selectQueryConnection';
     this.statusBarItem.name = 'DB Client Connection';
+    this.rememberSqlEditor(vscode.window.activeTextEditor);
     this.subscriptions.push(
-      vscode.window.onDidChangeActiveTextEditor(() => this.refreshStatus()),
+      vscode.window.onDidChangeActiveTextEditor((editor) => {
+        this.rememberSqlEditor(editor);
+        this.refreshStatus();
+      }),
       vscode.workspace.onDidCloseTextDocument((document) => {
         this.transientBindings.delete(this.documentKey(document));
       }),
@@ -95,6 +100,20 @@ export class QueryExecutor implements vscode.Disposable {
     }
   }
 
+  public getConnectionForDocument(document: vscode.TextDocument): ConnectionProfile | undefined {
+    const boundProfile = this.getBoundProfile(document);
+    if (boundProfile) {
+      return boundProfile;
+    }
+
+    const profiles = this.connectionManager.getProfiles();
+    return profiles.length === 1 ? profiles[0] : undefined;
+  }
+
+  public getPreferredSqlViewColumn(): vscode.ViewColumn {
+    return this.lastSqlViewColumn;
+  }
+
   public async openTable(tableRef: TableReference, offset = 0): Promise<void> {
     const limit = Math.max(1, Math.min(tableRef.connection.previewLimit ?? 100, 10000));
     const safeOffset = Math.max(0, Math.floor(offset));
@@ -117,12 +136,13 @@ export class QueryExecutor implements vscode.Disposable {
           const hasNext = queryResult.rows.length > limit;
           const rows = queryResult.rows.slice(0, limit);
 
-          this.resultPanel.show(panelKey, title, {
+          await this.resultPanel.show(panelKey, title, {
             ...queryResult,
             rows,
             rowCount: rows.length
           }, {
             connectionLabel: tableRef.connection.name,
+            placement: 'below',
             table: {
               reference: tableRef,
               columns
@@ -153,7 +173,7 @@ export class QueryExecutor implements vscode.Disposable {
         content: sql
       });
       await this.bindDocument(document, tableRef.connection);
-      await vscode.window.showTextDocument(document, vscode.ViewColumn.Active);
+      await vscode.window.showTextDocument(document, this.getPreferredSqlViewColumn());
     } catch (error) {
       vscode.window.showErrorMessage(this.toErrorMessage(error));
     }
@@ -208,8 +228,9 @@ export class QueryExecutor implements vscode.Disposable {
         async () => {
           const driver = await this.sessionManager.getDriver(profile);
           const result = await driver.query(sql);
-          this.resultPanel.show(panelKey, title, result, {
+          await this.resultPanel.show(panelKey, title, result, {
             connectionLabel: profile.name,
+            placement: 'below',
             onRerun: () => this.runQuery(profile, sql, title, panelKey)
           });
         }
@@ -274,6 +295,12 @@ export class QueryExecutor implements vscode.Disposable {
     const documentKey = this.documentKey(document);
     const profileId = this.transientBindings.get(documentKey) ?? this.getBindings()[documentKey];
     return profileId ? this.connectionManager.getProfile(profileId) : undefined;
+  }
+
+  private rememberSqlEditor(editor: vscode.TextEditor | undefined): void {
+    if (editor?.document.languageId === 'sql' && editor.viewColumn !== undefined) {
+      this.lastSqlViewColumn = editor.viewColumn;
+    }
   }
 
   private getBindings(): Record<string, string> {

@@ -2,7 +2,7 @@
   "name": "vscode-db-extension",
   "displayName": "Personal DB Client",
   "description": "A personal database client extension for VS Code.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "daewook0401",
   "repository": {
     "type": "git",
@@ -15,6 +15,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onLanguage:sql",
     "onView:personalDbClient.connections",
     "onCommand:personalDbClient.addConnection",
     "onCommand:personalDbClient.refresh",

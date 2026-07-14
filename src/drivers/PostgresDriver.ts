@@ -72,6 +72,7 @@ export class PostgresDriver implements DbDriver {
        from information_schema.schemata
        where schema_name not in ('information_schema', 'pg_catalog')
          and schema_name not like 'pg_toast%'
+         and schema_name !~ '^pg_temp_[0-9]+$'
        order by schema_name`
     );
 

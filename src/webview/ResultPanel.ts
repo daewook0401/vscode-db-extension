@@ -4,6 +4,7 @@ import { ColumnInfo, QueryResult, TableReference } from '../drivers/DbDriver';
 
 interface ResultPanelOptions {
   connectionLabel: string;
+  placement?: 'active' | 'below';
   onRerun?: () => Promise<void>;
   table?: {
     reference: TableReference;
@@ -26,8 +27,15 @@ interface PanelState {
   options: ResultPanelOptions;
 }
 
+interface ResultColumn {
+  column: vscode.ViewColumn;
+  created: boolean;
+}
+
 export class ResultPanel implements vscode.Disposable {
   private readonly panels = new Map<string, PanelState>();
+  private resultGroup: vscode.TabGroup | undefined;
+  private pendingResultColumn: Promise<ResultColumn> | undefined;
 
   public dispose(): void {
     for (const state of [...this.panels.values()]) {
@@ -36,18 +44,25 @@ export class ResultPanel implements vscode.Disposable {
     this.panels.clear();
   }
 
-  public show(
+  public async show(
     key: string,
     title: string,
     result: QueryResult,
     options: ResultPanelOptions
-  ): void {
+  ): Promise<void> {
     let state = this.panels.get(key);
     if (!state) {
+      const sourceEditor = options.placement === 'below'
+        ? vscode.window.activeTextEditor
+        : undefined;
+      const target = await this.resolveTargetColumn(options.placement);
       const panel = vscode.window.createWebviewPanel(
         'personalDbClient.results',
         title,
-        vscode.ViewColumn.Active,
+        {
+          viewColumn: target.column,
+          preserveFocus: options.placement === 'below'
+        },
         {
           enableScripts: true,
           retainContextWhenHidden: true
@@ -67,6 +82,19 @@ export class ResultPanel implements vscode.Disposable {
           void this.handleMessage(currentState, message);
         }
       });
+
+      if (options.placement === 'below' && panel.viewColumn !== undefined) {
+        this.resultGroup = vscode.window.tabGroups.all.find((group) => (
+          group.viewColumn === panel.viewColumn
+        ));
+      }
+      if (target.created && sourceEditor?.viewColumn !== undefined) {
+        await vscode.window.showTextDocument(sourceEditor.document, {
+          viewColumn: sourceEditor.viewColumn,
+          preserveFocus: false,
+          selection: sourceEditor.selection
+        });
+      }
     } else {
       state.title = title;
       state.result = result;
@@ -75,7 +103,53 @@ export class ResultPanel implements vscode.Disposable {
 
     state.panel.title = title;
     state.panel.webview.html = this.renderHtml(state, state.panel.webview);
-    state.panel.reveal(vscode.ViewColumn.Active);
+    state.panel.reveal(state.panel.viewColumn, options.placement === 'below');
+  }
+
+  private async resolveTargetColumn(placement: ResultPanelOptions['placement']): Promise<ResultColumn> {
+    if (placement !== 'below') {
+      return { column: vscode.ViewColumn.Active, created: false };
+    }
+
+    const existingColumn = this.existingResultColumn();
+    if (existingColumn !== undefined) {
+      return { column: existingColumn, created: false };
+    }
+
+    if (!this.pendingResultColumn) {
+      this.pendingResultColumn = this.createResultColumn().finally(() => {
+        this.pendingResultColumn = undefined;
+      });
+    }
+    return this.pendingResultColumn;
+  }
+
+  private existingResultColumn(): vscode.ViewColumn | undefined {
+    const panelColumn = [...this.panels.values()]
+      .find((state) => state.options.placement === 'below' && state.panel.viewColumn !== undefined)
+      ?.panel.viewColumn;
+    if (panelColumn !== undefined) {
+      const panelGroup = vscode.window.tabGroups.all.find((group) => group.viewColumn === panelColumn);
+      if (panelGroup) {
+        this.resultGroup = panelGroup;
+        return panelColumn;
+      }
+    }
+
+    return this.resultGroup && vscode.window.tabGroups.all.includes(this.resultGroup)
+      ? this.resultGroup.viewColumn
+      : undefined;
+  }
+
+  private async createResultColumn(): Promise<ResultColumn> {
+    try {
+      await vscode.commands.executeCommand('workbench.action.newGroupBelow');
+      this.resultGroup = vscode.window.tabGroups.activeTabGroup;
+      const column = this.resultGroup.viewColumn;
+      return { column, created: true };
+    } catch {
+      return { column: vscode.ViewColumn.Active, created: false };
+    }
   }
 
   private async handleMessage(state: PanelState, message: unknown): Promise<void> {

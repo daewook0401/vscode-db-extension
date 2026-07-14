@@ -30,6 +30,7 @@ test('PostgreSQL driver browses objects and preserves duplicate result columns',
     )`);
     await driver.query("INSERT INTO db_client_test.users (display_name) VALUES ('Ada')");
     await driver.query('CREATE VIEW db_client_test.active_users AS SELECT id, display_name FROM db_client_test.users');
+    await driver.query('CREATE TEMP TABLE db_client_temp_probe (id integer)');
 
     const schemas = await driver.listSchemas();
     const objects = await driver.listObjects('db_client_test');
@@ -40,6 +41,7 @@ test('PostgreSQL driver browses objects and preserves duplicate result columns',
     const multiStatementResult = await driver.query('SELECT 1 AS first_result; SELECT 2 AS second_result');
 
     assert.ok(schemas.includes('db_client_test'));
+    assert.equal(schemas.some((schema) => /^pg_temp_[0-9]+$/.test(schema)), false);
     assert.equal(objects.find((object) => object.name === 'users')?.type, 'table');
     assert.equal(objects.find((object) => object.name === 'active_users')?.type, 'view');
     assert.equal(columns.find((column) => column.name === 'id')?.isPrimaryKey, true);

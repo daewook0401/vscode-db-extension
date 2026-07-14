@@ -240,10 +240,21 @@ export class DatabaseTreeProvider implements vscode.TreeDataProvider<TreeNode>, 
 
   private applySchemaFilters(profile: ConnectionProfile, schemas: string[]): string[] {
     const filters = new Set((profile.schemaFilters ?? []).map((schema) => schema.toLowerCase()));
-    if (filters.size === 0) {
-      return schemas;
-    }
-    return schemas.filter((schema) => filters.has(schema.toLowerCase()));
+    const filtered = filters.size === 0
+      ? schemas
+      : schemas.filter((schema) => filters.has(schema.toLowerCase()));
+    const defaultSchema = profile.defaultSchema?.toLowerCase();
+    return [...filtered].sort((left, right) => {
+      if (defaultSchema) {
+        if (left.toLowerCase() === defaultSchema) {
+          return -1;
+        }
+        if (right.toLowerCase() === defaultSchema) {
+          return 1;
+        }
+      }
+      return left.localeCompare(right);
+    });
   }
 
   private objectDescription(object: DatabaseObjectInfo): string | undefined {

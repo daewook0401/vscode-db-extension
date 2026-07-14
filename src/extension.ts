@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { SqlCompletionProvider } from './completion/SqlCompletionProvider';
 import { ConnectionManager } from './connection/ConnectionManager';
 import { ConnectionSessionManager } from './connection/ConnectionSessionManager';
 import { ConnectionProfile } from './connection/ConnectionProfile';
@@ -17,6 +18,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const sessionManager = new ConnectionSessionManager(connectionManager);
   const resultPanel = new ResultPanel();
   const queryExecutor = new QueryExecutor(connectionManager, sessionManager, resultPanel, context.workspaceState);
+  const completionProvider = new SqlCompletionProvider(sessionManager, queryExecutor);
   const treeProvider = new DatabaseTreeProvider(connectionManager, sessionManager);
   const refreshConnections = (): void => {
     treeProvider.refresh();
@@ -27,7 +29,13 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     resultPanel,
     queryExecutor,
+    completionProvider,
     treeProvider,
+    vscode.languages.registerCompletionItemProvider(
+      { language: 'sql' },
+      completionProvider,
+      '.'
+    ),
     vscode.window.createTreeView('personalDbClient.connections', {
       treeDataProvider: treeProvider,
       showCollapseAll: true
@@ -273,7 +281,7 @@ async function openNewSqlPage(
   if (profile) {
     await queryExecutor.bindDocument(document, profile);
   }
-  await vscode.window.showTextDocument(document, vscode.ViewColumn.Active);
+  await vscode.window.showTextDocument(document, queryExecutor.getPreferredSqlViewColumn());
 }
 
 function buildNewSqlContent(profile: ConnectionProfile | undefined): string {
